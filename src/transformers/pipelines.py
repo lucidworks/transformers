@@ -21,6 +21,7 @@ import pickle
 import sys
 import uuid
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from contextlib import contextmanager
 from itertools import chain
 from multiprocessing import cpu_count
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence,
 from uuid import UUID
 
 import numpy as np
+from tqdm import tqdm
 
 from .configuration_auto import AutoConfig
 from .configuration_utils import PretrainedConfig
@@ -38,7 +40,7 @@ from .modelcard import ModelCard
 from .tokenization_auto import AutoTokenizer
 from .tokenization_bert import BasicTokenizer
 from .tokenization_utils import PreTrainedTokenizer
-from .tokenization_utils_base import BatchEncoding, PaddingStrategy
+from .tokenization_utils_base import BatchEncoding
 from .utils import logging
 
 
@@ -1383,7 +1385,7 @@ class TokenClassificationPipeline(Pipeline):
                 if self.framework == "tf":
                     entities = self.model(tokens.data)[0][0].numpy()
                     input_ids = tokens["input_ids"].numpy()[0]
-                else:
+                elif self.framework == "pt":
                     with torch.no_grad():
                         tokens = self.ensure_tensor_on_device(**tokens)
                         entities = self.model(**tokens)[0][0].cpu().numpy()
@@ -1401,7 +1403,6 @@ class TokenClassificationPipeline(Pipeline):
             ]
 
             for idx, label_idx in filtered_labels_idx:
-
                 entity = {
                     "word": self.tokenizer.convert_ids_to_tokens(int(input_ids[idx])),
                     "score": score[idx][label_idx].item(),
@@ -1637,6 +1638,57 @@ class QuestionAnsweringPipeline(Pipeline):
         else:
             return SquadExample(None, question, context, None, None, None)
 
+    def extract_answers(self, example, features_and_positions, handle_impossible_answer, topk, max_answer_len):
+        features, start, end = [], [], []
+
+        for feature, start_pos, end_pos in features_and_positions:
+            features.append(feature)
+            start.append(start_pos)
+            end.append(end_pos)
+
+        min_null_score = 1000000  # large and positive
+        answers = []
+        for (feature, start_, end_) in zip(features, start, end):
+            # Ensure padded tokens & question tokens cannot belong to the set of candidate answers.
+            undesired_tokens = np.abs(np.array(feature.p_mask) - 1) & feature.attention_mask
+
+            # Generate mask
+            undesired_tokens_mask = undesired_tokens == 0.0
+
+            # Make sure non-context indexes in the tensor cannot contribute to the softmax
+            start_ = np.where(undesired_tokens_mask, -10000.0, start_)
+            end_ = np.where(undesired_tokens_mask, -10000.0, end_)
+
+            # Normalize logits and spans to retrieve the answer
+            start_ = np.exp(start_ - np.log(np.sum(np.exp(start_), axis=-1, keepdims=True)))
+            end_ = np.exp(end_ - np.log(np.sum(np.exp(end_), axis=-1, keepdims=True)))
+
+            if handle_impossible_answer:
+                min_null_score = min(min_null_score, (start_[0] * end_[0]).item())
+
+            # Mask CLS
+            start_[0] = end_[0] = 0.0
+
+            starts, ends, scores = self.decode(start_, end_, topk, max_answer_len)
+            char_to_word = np.array(example.char_to_word_offset)
+
+            # Convert the answer (tokens) back to the original text
+            answers += [
+                {
+                    "score": score.item(),
+                    "start": np.where(char_to_word == feature.token_to_orig_map[s])[0][0].item(),
+                    "end": np.where(char_to_word == feature.token_to_orig_map[e])[0][-1].item(),
+                    "answer": " ".join(
+                        example.doc_tokens[feature.token_to_orig_map[s] : feature.token_to_orig_map[e] + 1]
+                    ),
+                }
+                for s, e, score in zip(starts, ends, scores)
+            ]
+
+        if handle_impossible_answer:
+            answers.append({"score": min_null_score, "start": 0, "end": 0, "answer": ""})
+        return sorted(answers, key=lambda x: x["score"], reverse=True)[:topk]
+
     def __call__(self, *args, **kwargs):
         """
         Answer the question(s) given as inputs by using the context(s).
@@ -1686,6 +1738,8 @@ class QuestionAnsweringPipeline(Pipeline):
         kwargs.setdefault("max_seq_len", 384)
         kwargs.setdefault("max_question_len", 64)
         kwargs.setdefault("handle_impossible_answer", False)
+        kwargs.setdefault("batch_size", 16)
+        kwargs.setdefault("enable_tqdm", True)
 
         if kwargs["topk"] < 1:
             raise ValueError("topk parameter should be >= 1 (got {})".format(kwargs["topk"]))
@@ -1695,25 +1749,29 @@ class QuestionAnsweringPipeline(Pipeline):
 
         # Convert inputs to features
         examples = self._args_parser(*args, **kwargs)
-        features_list = [
-            squad_convert_examples_to_features(
-                examples=[example],
-                tokenizer=self.tokenizer,
-                max_seq_length=kwargs["max_seq_len"],
-                doc_stride=kwargs["doc_stride"],
-                max_query_length=kwargs["max_question_len"],
-                padding_strategy=PaddingStrategy.DO_NOT_PAD.value,
-                is_training=False,
-                tqdm_enabled=False,
-            )
-            for example in examples
-        ]
-        all_answers = []
-        for features, example in zip(features_list, examples):
-            model_input_names = self.tokenizer.model_input_names + ["input_ids"]
-            fw_args = {k: [feature.__dict__[k] for feature in features] for k in model_input_names}
 
-            # Manage tensor allocation on correct device
+        features_list = squad_convert_examples_to_features(
+            examples=examples,
+            tokenizer=self.tokenizer,
+            max_seq_length=kwargs["max_seq_len"],
+            doc_stride=kwargs["doc_stride"],
+            max_query_length=kwargs["max_question_len"],
+            # padding_strategy=PaddingStrategy.DO_NOT_PAD.value,
+            is_training=False,
+            tqdm_enabled=kwargs["enable_tqdm"],
+        )
+
+        flattend_examples = [examples[feature.example_index] for feature in features_list]
+        ex_feat = [flattend_examples, features_list]
+
+        # Encoding
+        model_input_names = self.tokenizer.model_input_names + ["input_ids"]
+        batch_size = kwargs["batch_size"]
+        all_starts = []
+        all_ends = []
+        for i in tqdm(range(0, len(ex_feat[0]), batch_size), desc="Querying model", disable=not kwargs["enable_tqdm"]):
+            batch = ex_feat[1][i : i + batch_size]
+            fw_args = {k: [feature.__dict__[k] for feature in batch] for k in model_input_names}
             with self.device_placement():
                 if not self.use_onnx:
                     if self.framework == "tf":
@@ -1728,51 +1786,35 @@ class QuestionAnsweringPipeline(Pipeline):
                             start, end = start.cpu().numpy(), end.cpu().numpy()
                 else:
                     start, end = self.model.run(None, fw_args)[:2]
+            # Shape of start and end = (batch_size, context_len)
+            all_starts.extend(start)
+            all_ends.extend(end)
+        all_starts = np.stack(all_starts).tolist()
+        all_ends = np.stack(all_ends).tolist()
+        ex_feat.append(all_starts)
+        ex_feat.append(all_ends)
 
-            min_null_score = 1000000  # large and positive
-            answers = []
-            for (feature, start_, end_) in zip(features, start, end):
-                # Ensure padded tokens & question tokens cannot belong to the set of candidate answers.
-                undesired_tokens = np.abs(np.array(feature.p_mask) - 1) & feature.attention_mask
+        ex_feat_dict = OrderedDict()
+        for index, example in enumerate(ex_feat[0]):
+            if example not in ex_feat_dict:
+                ex_feat_dict[example] = [(ex_feat[1][index], ex_feat[2][index], ex_feat[3][index])]
+            else:
+                ex_feat_dict[example].append((ex_feat[1][index], ex_feat[2][index], ex_feat[3][index]))
 
-                # Generate mask
-                undesired_tokens_mask = undesired_tokens == 0.0
-
-                # Make sure non-context indexes in the tensor cannot contribute to the softmax
-                start_ = np.where(undesired_tokens_mask, -10000.0, start_)
-                end_ = np.where(undesired_tokens_mask, -10000.0, end_)
-
-                # Normalize logits and spans to retrieve the answer
-                start_ = np.exp(start_ - np.log(np.sum(np.exp(start_), axis=-1, keepdims=True)))
-                end_ = np.exp(end_ - np.log(np.sum(np.exp(end_), axis=-1, keepdims=True)))
-
-                if kwargs["handle_impossible_answer"]:
-                    min_null_score = min(min_null_score, (start_[0] * end_[0]).item())
-
-                # Mask CLS
-                start_[0] = end_[0] = 0.0
-
-                starts, ends, scores = self.decode(start_, end_, kwargs["topk"], kwargs["max_answer_len"])
-                char_to_word = np.array(example.char_to_word_offset)
-
-                # Convert the answer (tokens) back to the original text
-                answers += [
-                    {
-                        "score": score.item(),
-                        "start": np.where(char_to_word == feature.token_to_orig_map[s])[0][0].item(),
-                        "end": np.where(char_to_word == feature.token_to_orig_map[e])[0][-1].item(),
-                        "answer": " ".join(
-                            example.doc_tokens[feature.token_to_orig_map[s] : feature.token_to_orig_map[e] + 1]
-                        ),
-                    }
-                    for s, e, score in zip(starts, ends, scores)
-                ]
-
-            if kwargs["handle_impossible_answer"]:
-                answers.append({"score": min_null_score, "start": 0, "end": 0, "answer": ""})
-
-            answers = sorted(answers, key=lambda x: x["score"], reverse=True)[: kwargs["topk"]]
-            all_answers += answers
+        # Extract answers
+        all_answers = []
+        for example, features_and_positions in tqdm(
+            ex_feat_dict.items(), desc="Extracting answers", disable=not kwargs["enable_tqdm"]
+        ):
+            all_answers.append(
+                self.extract_answers(
+                    example,
+                    features_and_positions,
+                    kwargs["handle_impossible_answer"],
+                    kwargs["topk"],
+                    kwargs["max_answer_len"],
+                )
+            )
 
         if len(all_answers) == 1:
             return all_answers[0]

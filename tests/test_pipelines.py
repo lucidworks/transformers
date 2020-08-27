@@ -650,13 +650,13 @@ class QAPipelineTests(unittest.TestCase):
         ]
         self.assertIsNotNone(nlp)
 
-        mono_result = nlp(valid_inputs[0])
+        mono_result = nlp(valid_inputs[0])[0]
         self.assertIsInstance(mono_result, dict)
 
         for key in output_keys:
             self.assertIn(key, mono_result)
 
-        multi_result = nlp(valid_inputs)
+        multi_result = nlp(valid_inputs)[0]
         self.assertIsInstance(multi_result, list)
         self.assertIsInstance(multi_result[0], dict)
 
