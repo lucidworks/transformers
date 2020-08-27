@@ -5,7 +5,6 @@ from transformers import pipeline
 from transformers.pipelines import SUPPORTED_TASKS, Conversation, DefaultArgumentHandler, Pipeline
 from transformers.testing_utils import require_tf, require_torch, slow, torch_device
 
-
 DEFAULT_DEVICE_NUM = -1 if torch_device == "cpu" else 0
 VALID_INPUTS = ["A simple string", ["list of strings"]]
 
@@ -135,14 +134,14 @@ class DefaultArgumentHandlerTestCase(unittest.TestCase):
 
 class MonoColumnInputTestCase(unittest.TestCase):
     def _test_mono_column_pipeline(
-        self,
-        nlp: Pipeline,
-        valid_inputs: List,
-        output_keys: Iterable[str],
-        invalid_inputs: List = [None],
-        expected_multi_result: Optional[List] = None,
-        expected_check_keys: Optional[List[str]] = None,
-        **kwargs,
+            self,
+            nlp: Pipeline,
+            valid_inputs: List,
+            output_keys: Iterable[str],
+            invalid_inputs: List = [None],
+            expected_multi_result: Optional[List] = None,
+            expected_check_keys: Optional[List[str]] = None,
+            **kwargs,
     ):
         self.assertIsNotNone(nlp)
 
@@ -164,7 +163,8 @@ class MonoColumnInputTestCase(unittest.TestCase):
             for result, expect in zip(multi_result, expected_multi_result):
                 for key in expected_check_keys or []:
                     self.assertEqual(
-                        set([o[key] for o in result]), set([o[key] for o in expect]),
+                        set([o[key] for o in result]),
+                        set([o[key] for o in expect]),
                     )
 
         if isinstance(multi_result[0], list):
@@ -214,7 +214,13 @@ class MonoColumnInputTestCase(unittest.TestCase):
             "This is"  # No mask_token is not supported
         ]
         for model_name in FILL_MASK_FINETUNED_MODELS:
-            nlp = pipeline(task="fill-mask", model=model_name, tokenizer=model_name, framework="pt", topk=2,)
+            nlp = pipeline(
+                task="fill-mask",
+                model=model_name,
+                tokenizer=model_name,
+                framework="pt",
+                topk=2,
+            )
             self._test_mono_column_pipeline(
                 nlp, valid_inputs, mandatory_keys, invalid_inputs, expected_check_keys=["sequence"]
             )
@@ -231,7 +237,13 @@ class MonoColumnInputTestCase(unittest.TestCase):
             "This is"  # No mask_token is not supported
         ]
         for model_name in FILL_MASK_FINETUNED_MODELS:
-            nlp = pipeline(task="fill-mask", model=model_name, tokenizer=model_name, framework="tf", topk=2,)
+            nlp = pipeline(
+                task="fill-mask",
+                model=model_name,
+                tokenizer=model_name,
+                framework="tf",
+                topk=2,
+            )
             self._test_mono_column_pipeline(
                 nlp, valid_inputs, mandatory_keys, invalid_inputs, expected_check_keys=["sequence"]
             )
@@ -274,7 +286,13 @@ class MonoColumnInputTestCase(unittest.TestCase):
         ]
         valid_targets = [" Patrick", " Clara"]
         for model_name in LARGE_FILL_MASK_FINETUNED_MODELS:
-            nlp = pipeline(task="fill-mask", model=model_name, tokenizer=model_name, framework="pt", topk=2,)
+            nlp = pipeline(
+                task="fill-mask",
+                model=model_name,
+                tokenizer=model_name,
+                framework="pt",
+                topk=2,
+            )
             self._test_mono_column_pipeline(
                 nlp,
                 valid_inputs,
@@ -343,7 +361,12 @@ class MonoColumnInputTestCase(unittest.TestCase):
         invalid_inputs = [4, "<mask>"]
         mandatory_keys = ["summary_text"]
         for model_name in TF_SUMMARIZATION_FINETUNED_MODELS:
-            nlp = pipeline(task="summarization", model=model_name, tokenizer=model_name, framework="tf",)
+            nlp = pipeline(
+                task="summarization",
+                model=model_name,
+                tokenizer=model_name,
+                framework="tf",
+            )
             self._test_mono_column_pipeline(
                 nlp, VALID_INPUTS, mandatory_keys, invalid_inputs=invalid_inputs, **SUMMARIZATION_KWARGS
             )
@@ -355,7 +378,10 @@ class MonoColumnInputTestCase(unittest.TestCase):
         for model_name, task in TRANSLATION_FINETUNED_MODELS:
             nlp = pipeline(task=task, model=model_name, tokenizer=model_name)
             self._test_mono_column_pipeline(
-                nlp, VALID_INPUTS, mandatory_keys, invalid_inputs,
+                nlp,
+                VALID_INPUTS,
+                mandatory_keys,
+                invalid_inputs,
             )
 
     @require_tf
@@ -646,6 +672,14 @@ class QAPipelineTests(unittest.TestCase):
             nlp = pipeline(task="question-answering", model=model_name, tokenizer=model_name)
             self._test_qa_pipeline(nlp)
 
+        # Uncomment when onnx model available
+        # model_name = "deepset/bert-base-cased-squad2"
+        # use_onnx = True
+        # onnx_path = "/Users/binoydalal/Downloads/bert-base-cased-squad2-optimized-quantized.onnx"
+        # nlp = pipeline(task="question-answering", model=model_name, tokenizer=model_name, use_onnx=use_onnx,
+        #                onnx_path=onnx_path)
+        # self._test_qa_pipeline(nlp)
+
     @require_tf
     def test_tf_question_answering(self):
         for model_name in QA_FINETUNED_MODELS:
@@ -655,7 +689,9 @@ class QAPipelineTests(unittest.TestCase):
 
 class NerPipelineTests(unittest.TestCase):
     def _test_ner_pipeline(
-        self, nlp: Pipeline, output_keys: Iterable[str],
+            self,
+            nlp: Pipeline,
+            output_keys: Iterable[str],
     ):
 
         ungrouped_ner_inputs = [
