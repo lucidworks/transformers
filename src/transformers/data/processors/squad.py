@@ -388,7 +388,7 @@ def squad_convert_examples_to_features(
         )
         features = list(
             tqdm(
-                p.imap(annotate_, examples, chunksize=32),
+                p.map(annotate_, examples),
                 total=len(examples),
                 desc="convert squad examples to features",
                 disable=not tqdm_enabled,
@@ -408,7 +408,7 @@ def squad_convert_examples_to_features(
             new_features.append(example_feature)
             unique_id += 1
         example_index += 1
-    features = new_features
+    features = new_features if new_features else [[]]
     del new_features
     if return_dataset == "pt":
         if not is_torch_available():

@@ -16,12 +16,12 @@
 
 import csv
 import json
-import logging
 import os
 import pickle
 import sys
 import uuid
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from contextlib import contextmanager
 from itertools import chain
 from multiprocessing import cpu_count
@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence,
 from uuid import UUID
 
 import numpy as np
+from tqdm import tqdm
 
 from .configuration_auto import AutoConfig
 from .configuration_utils import PretrainedConfig
@@ -39,47 +40,50 @@ from .modelcard import ModelCard
 from .tokenization_auto import AutoTokenizer
 from .tokenization_bert import BasicTokenizer
 from .tokenization_utils import PreTrainedTokenizer
-from .tokenization_utils_base import BatchEncoding, PaddingStrategy
+from .tokenization_utils_base import BatchEncoding
+from .utils import logging
 
 
 if is_tf_available():
     import tensorflow as tf
+
     from .modeling_tf_auto import (
-        TFAutoModel,
-        TFAutoModelForSequenceClassification,
-        TFAutoModelForQuestionAnswering,
-        TFAutoModelForTokenClassification,
-        TFAutoModelWithLMHead,
-        TF_MODEL_WITH_LM_HEAD_MAPPING,
+        TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING,
         TF_MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
         TF_MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING,
-        TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING,
+        TF_MODEL_WITH_LM_HEAD_MAPPING,
+        TFAutoModel,
         TFAutoModelForCausalLM,
+        TFAutoModelForQuestionAnswering,
+        TFAutoModelForSequenceClassification,
+        TFAutoModelForTokenClassification,
+        TFAutoModelWithLMHead,
     )
 
 if is_torch_available():
     import torch
+
     from .modeling_auto import (
-        AutoModel,
-        AutoModelForSequenceClassification,
-        AutoModelForQuestionAnswering,
-        AutoModelForTokenClassification,
-        AutoModelForSeq2SeqLM,
-        AutoModelForCausalLM,
-        AutoModelForMaskedLM,
-        MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
-        MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING,
+        MODEL_FOR_MASKED_LM_MAPPING,
         MODEL_FOR_QUESTION_ANSWERING_MAPPING,
         MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING,
-        MODEL_FOR_MASKED_LM_MAPPING,
+        MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
+        MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING,
+        AutoModel,
+        AutoModelForCausalLM,
+        AutoModelForMaskedLM,
+        AutoModelForQuestionAnswering,
+        AutoModelForSeq2SeqLM,
+        AutoModelForSequenceClassification,
+        AutoModelForTokenClassification,
     )
 
 if TYPE_CHECKING:
-    from .modeling_utils import PreTrainedModel
     from .modeling_tf_utils import TFPreTrainedModel
+    from .modeling_utils import PreTrainedModel
 
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 
 
 def get_framework(model=None):
@@ -207,7 +211,11 @@ class PipelineDataFormat:
     SUPPORTED_FORMATS = ["json", "csv", "pipe"]
 
     def __init__(
-        self, output_path: Optional[str], input_path: Optional[str], column: Optional[str], overwrite: bool = False,
+        self,
+        output_path: Optional[str],
+        input_path: Optional[str],
+        column: Optional[str],
+        overwrite: bool = False,
     ):
         self.output_path = output_path
         self.input_path = input_path
@@ -260,7 +268,11 @@ class PipelineDataFormat:
 
     @staticmethod
     def from_str(
-        format: str, output_path: Optional[str], input_path: Optional[str], column: Optional[str], overwrite=False,
+        format: str,
+        output_path: Optional[str],
+        input_path: Optional[str],
+        column: Optional[str],
+        overwrite=False,
     ) -> "PipelineDataFormat":
         """
         Creates an instance of the right subclass of :class:`~transformers.pipelines.PipelineDataFormat` depending
@@ -304,7 +316,11 @@ class CsvPipelineDataFormat(PipelineDataFormat):
     """
 
     def __init__(
-        self, output_path: Optional[str], input_path: Optional[str], column: Optional[str], overwrite=False,
+        self,
+        output_path: Optional[str],
+        input_path: Optional[str],
+        column: Optional[str],
+        overwrite=False,
     ):
         super().__init__(output_path, input_path, column, overwrite=overwrite)
 
@@ -345,7 +361,11 @@ class JsonPipelineDataFormat(PipelineDataFormat):
     """
 
     def __init__(
-        self, output_path: Optional[str], input_path: Optional[str], column: Optional[str], overwrite=False,
+        self,
+        output_path: Optional[str],
+        input_path: Optional[str],
+        column: Optional[str],
+        overwrite=False,
     ):
         super().__init__(output_path, input_path, column, overwrite=overwrite)
 
@@ -613,7 +633,10 @@ class Pipeline(_ScikitCompat):
         # Parse arguments
         inputs = self._args_parser(*args, **kwargs)
         inputs = self.tokenizer(
-            inputs, add_special_tokens=add_special_tokens, return_tensors=self.framework, padding=padding,
+            inputs,
+            add_special_tokens=add_special_tokens,
+            return_tensors=self.framework,
+            padding=padding,
         )
 
         return inputs
@@ -1229,7 +1252,7 @@ class FillMaskPipeline(Pipeline):
                     values = tf.gather_nd(values, tf.reshape(sort_inds, (-1, 1))).numpy()
                     predictions = target_inds[sort_inds.numpy()]
             else:
-                masked_index = (input_ids == self.tokenizer.mask_token_id).nonzero()
+                masked_index = torch.nonzero(input_ids == self.tokenizer.mask_token_id, as_tuple=False)
 
                 # Fill mask pipeline supports only one ${mask_token} per sample
                 self.ensure_exactly_one_mask_token(masked_index.numpy())
@@ -1352,14 +1375,17 @@ class TokenClassificationPipeline(Pipeline):
             with self.device_placement():
 
                 tokens = self.tokenizer(
-                    sentence, return_attention_mask=False, return_tensors=self.framework, truncation=True,
+                    sentence,
+                    return_attention_mask=False,
+                    return_tensors=self.framework,
+                    truncation=True,
                 )
 
                 # Forward
                 if self.framework == "tf":
                     entities = self.model(tokens.data)[0][0].numpy()
                     input_ids = tokens["input_ids"].numpy()[0]
-                else:
+                elif self.framework == "pt":
                     with torch.no_grad():
                         tokens = self.ensure_tensor_on_device(**tokens)
                         entities = self.model(**tokens)[0][0].cpu().numpy()
@@ -1377,7 +1403,6 @@ class TokenClassificationPipeline(Pipeline):
             ]
 
             for idx, label_idx in filtered_labels_idx:
-
                 entity = {
                     "word": self.tokenizer.convert_ids_to_tokens(int(input_ids[idx])),
                     "score": score[idx][label_idx].item(),
@@ -1613,6 +1638,57 @@ class QuestionAnsweringPipeline(Pipeline):
         else:
             return SquadExample(None, question, context, None, None, None)
 
+    def extract_answers(self, example, features_and_positions, handle_impossible_answer, topk, max_answer_len):
+        features, start, end = [], [], []
+
+        for feature, start_pos, end_pos in features_and_positions:
+            features.append(feature)
+            start.append(start_pos)
+            end.append(end_pos)
+
+        min_null_score = 1000000  # large and positive
+        answers = []
+        for (feature, start_, end_) in zip(features, start, end):
+            # Ensure padded tokens & question tokens cannot belong to the set of candidate answers.
+            undesired_tokens = np.abs(np.array(feature.p_mask) - 1) & feature.attention_mask
+
+            # Generate mask
+            undesired_tokens_mask = undesired_tokens == 0.0
+
+            # Make sure non-context indexes in the tensor cannot contribute to the softmax
+            start_ = np.where(undesired_tokens_mask, -10000.0, start_)
+            end_ = np.where(undesired_tokens_mask, -10000.0, end_)
+
+            # Normalize logits and spans to retrieve the answer
+            start_ = np.exp(start_ - np.log(np.sum(np.exp(start_), axis=-1, keepdims=True)))
+            end_ = np.exp(end_ - np.log(np.sum(np.exp(end_), axis=-1, keepdims=True)))
+
+            if handle_impossible_answer:
+                min_null_score = min(min_null_score, (start_[0] * end_[0]).item())
+
+            # Mask CLS
+            start_[0] = end_[0] = 0.0
+
+            starts, ends, scores = self.decode(start_, end_, topk, max_answer_len)
+            char_to_word = np.array(example.char_to_word_offset)
+
+            # Convert the answer (tokens) back to the original text
+            answers += [
+                {
+                    "score": score.item(),
+                    "start": np.where(char_to_word == feature.token_to_orig_map[s])[0][0].item(),
+                    "end": np.where(char_to_word == feature.token_to_orig_map[e])[0][-1].item(),
+                    "answer": " ".join(
+                        example.doc_tokens[feature.token_to_orig_map[s] : feature.token_to_orig_map[e] + 1]
+                    ),
+                }
+                for s, e, score in zip(starts, ends, scores)
+            ]
+
+        if handle_impossible_answer:
+            answers.append({"score": min_null_score, "start": 0, "end": 0, "answer": ""})
+        return sorted(answers, key=lambda x: x["score"], reverse=True)[:topk]
+
     def __call__(self, *args, **kwargs):
         """
         Answer the question(s) given as inputs by using the context(s).
@@ -1662,6 +1738,8 @@ class QuestionAnsweringPipeline(Pipeline):
         kwargs.setdefault("max_seq_len", 384)
         kwargs.setdefault("max_question_len", 64)
         kwargs.setdefault("handle_impossible_answer", False)
+        kwargs.setdefault("batch_size", 16)
+        kwargs.setdefault("enable_tqdm", True)
 
         if kwargs["topk"] < 1:
             raise ValueError("topk parameter should be >= 1 (got {})".format(kwargs["topk"]))
@@ -1671,25 +1749,29 @@ class QuestionAnsweringPipeline(Pipeline):
 
         # Convert inputs to features
         examples = self._args_parser(*args, **kwargs)
-        features_list = [
-            squad_convert_examples_to_features(
-                examples=[example],
-                tokenizer=self.tokenizer,
-                max_seq_length=kwargs["max_seq_len"],
-                doc_stride=kwargs["doc_stride"],
-                max_query_length=kwargs["max_question_len"],
-                padding_strategy=PaddingStrategy.DO_NOT_PAD.value,
-                is_training=False,
-                tqdm_enabled=False,
-            )
-            for example in examples
-        ]
-        all_answers = []
-        for features, example in zip(features_list, examples):
-            model_input_names = self.tokenizer.model_input_names + ["input_ids"]
-            fw_args = {k: [feature.__dict__[k] for feature in features] for k in model_input_names}
 
-            # Manage tensor allocation on correct device
+        features_list = squad_convert_examples_to_features(
+            examples=examples,
+            tokenizer=self.tokenizer,
+            max_seq_length=kwargs["max_seq_len"],
+            doc_stride=kwargs["doc_stride"],
+            max_query_length=kwargs["max_question_len"],
+            # padding_strategy=PaddingStrategy.DO_NOT_PAD.value,
+            is_training=False,
+            tqdm_enabled=kwargs["enable_tqdm"],
+        )
+
+        flattend_examples = [examples[feature.example_index] for feature in features_list]
+        ex_feat = [flattend_examples, features_list]
+
+        # Encoding
+        model_input_names = self.tokenizer.model_input_names + ["input_ids"]
+        batch_size = kwargs["batch_size"]
+        all_starts = []
+        all_ends = []
+        for i in tqdm(range(0, len(ex_feat[0]), batch_size), desc="Querying model", disable=not kwargs["enable_tqdm"]):
+            batch = ex_feat[1][i : i + batch_size]
+            fw_args = {k: [feature.__dict__[k] for feature in batch] for k in model_input_names}
             with self.device_placement():
                 if not self.use_onnx:
                     if self.framework == "tf":
@@ -1704,51 +1786,35 @@ class QuestionAnsweringPipeline(Pipeline):
                             start, end = start.cpu().numpy(), end.cpu().numpy()
                 else:
                     start, end = self.model.run(None, fw_args)[:2]
+            # Shape of start and end = (batch_size, context_len)
+            all_starts.extend(start)
+            all_ends.extend(end)
+        all_starts = np.stack(all_starts).tolist()
+        all_ends = np.stack(all_ends).tolist()
+        ex_feat.append(all_starts)
+        ex_feat.append(all_ends)
 
-            min_null_score = 1000000  # large and positive
-            answers = []
-            for (feature, start_, end_) in zip(features, start, end):
-                # Ensure padded tokens & question tokens cannot belong to the set of candidate answers.
-                undesired_tokens = np.abs(np.array(feature.p_mask) - 1) & feature.attention_mask
+        ex_feat_dict = OrderedDict()
+        for index, example in enumerate(ex_feat[0]):
+            if example not in ex_feat_dict:
+                ex_feat_dict[example] = [(ex_feat[1][index], ex_feat[2][index], ex_feat[3][index])]
+            else:
+                ex_feat_dict[example].append((ex_feat[1][index], ex_feat[2][index], ex_feat[3][index]))
 
-                # Generate mask
-                undesired_tokens_mask = undesired_tokens == 0.0
-
-                # Make sure non-context indexes in the tensor cannot contribute to the softmax
-                start_ = np.where(undesired_tokens_mask, -10000.0, start_)
-                end_ = np.where(undesired_tokens_mask, -10000.0, end_)
-
-                # Normalize logits and spans to retrieve the answer
-                start_ = np.exp(start_ - np.log(np.sum(np.exp(start_), axis=-1, keepdims=True)))
-                end_ = np.exp(end_ - np.log(np.sum(np.exp(end_), axis=-1, keepdims=True)))
-
-                if kwargs["handle_impossible_answer"]:
-                    min_null_score = min(min_null_score, (start_[0] * end_[0]).item())
-
-                # Mask CLS
-                start_[0] = end_[0] = 0.0
-
-                starts, ends, scores = self.decode(start_, end_, kwargs["topk"], kwargs["max_answer_len"])
-                char_to_word = np.array(example.char_to_word_offset)
-
-                # Convert the answer (tokens) back to the original text
-                answers += [
-                    {
-                        "score": score.item(),
-                        "start": np.where(char_to_word == feature.token_to_orig_map[s])[0][0].item(),
-                        "end": np.where(char_to_word == feature.token_to_orig_map[e])[0][-1].item(),
-                        "answer": " ".join(
-                            example.doc_tokens[feature.token_to_orig_map[s] : feature.token_to_orig_map[e] + 1]
-                        ),
-                    }
-                    for s, e, score in zip(starts, ends, scores)
-                ]
-
-            if kwargs["handle_impossible_answer"]:
-                answers.append({"score": min_null_score, "start": 0, "end": 0, "answer": ""})
-
-            answers = sorted(answers, key=lambda x: x["score"], reverse=True)[: kwargs["topk"]]
-            all_answers += answers
+        # Extract answers
+        all_answers = []
+        for example, features_and_positions in tqdm(
+            ex_feat_dict.items(), desc="Extracting answers", disable=not kwargs["enable_tqdm"]
+        ):
+            all_answers.append(
+                self.extract_answers(
+                    example,
+                    features_and_positions,
+                    kwargs["handle_impossible_answer"],
+                    kwargs["topk"],
+                    kwargs["max_answer_len"],
+                )
+            )
 
         if len(all_answers) == 1:
             return all_answers[0]
@@ -1954,7 +2020,9 @@ class SummarizationPipeline(Pipeline):
                 )
 
             summaries = self.model.generate(
-                inputs["input_ids"], attention_mask=inputs["attention_mask"], **generate_kwargs,
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                **generate_kwargs,
             )
 
             results = []
@@ -1964,7 +2032,9 @@ class SummarizationPipeline(Pipeline):
                     record["summary_token_ids"] = summary
                 if return_text:
                     record["summary_text"] = self.tokenizer.decode(
-                        summary, skip_special_tokens=True, clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+                        summary,
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=clean_up_tokenization_spaces,
                     )
                 results.append(record)
             return results
@@ -2061,7 +2131,9 @@ class TranslationPipeline(Pipeline):
                 )
 
             translations = self.model.generate(
-                inputs["input_ids"], attention_mask=inputs["attention_mask"], **generate_kwargs,
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                **generate_kwargs,
             )
             results = []
             for translation in translations:
@@ -2300,7 +2372,9 @@ class ConversationalPipeline(Pipeline):
                     "You might consider trimming the early phase of the conversation".format(input_length, max_length)
                 )
             generated_responses = self.model.generate(
-                inputs["input_ids"], attention_mask=inputs["attention_mask"], **generate_kwargs,
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                **generate_kwargs,
             )
 
             cleaned_history = self._clean_padding_history(generated_responses)
@@ -2384,7 +2458,8 @@ class ConversationalPipeline(Pipeline):
         max_len = max([len(item) for item in outputs])
         outputs = [output + [self.pad_token_id] * (max_len - len(output)) for output in outputs]
         outputs = BatchEncoding(
-            {"input_ids": outputs, "attention_mask": [[1] * len(outputs)]}, tensor_type=self.framework,
+            {"input_ids": outputs, "attention_mask": [[1] * len(outputs)]},
+            tensor_type=self.framework,
         )
         return outputs
 
