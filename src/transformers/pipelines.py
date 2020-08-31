@@ -538,9 +538,10 @@ class Pipeline(_ScikitCompat):
             self.model = self.model.to(self.device)
 
         # Update config with task specific parameters
-        task_specific_params = self.model.config.task_specific_params
-        if task_specific_params is not None and task in task_specific_params:
-            self.model.config.update(task_specific_params.get(task))
+        if not self.use_onnx:
+            task_specific_params = self.model.config.task_specific_params
+            if task_specific_params is not None and task in task_specific_params:
+                self.model.config.update(task_specific_params.get(task))
 
     def save_pretrained(self, save_directory: str):
         """
@@ -1587,9 +1588,10 @@ class QuestionAnsweringPipeline(Pipeline):
             **kwargs,
         )
 
-        self.check_model_type(
-            TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING if self.framework == "tf" else MODEL_FOR_QUESTION_ANSWERING_MAPPING
-        )
+        if not self.use_onnx:
+            self.check_model_type(
+                TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING if self.framework == "tf" else MODEL_FOR_QUESTION_ANSWERING_MAPPING
+            )
 
         if self.use_onnx:
             # Do onnx loading here
@@ -2634,6 +2636,8 @@ def pipeline(
         tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
         pipeline('ner', model=model, tokenizer=tokenizer)
     """
+    kwargs.setdefault("use_onnx", False)
+
     # Retrieve the task
     if task not in SUPPORTED_TASKS:
         raise KeyError("Unknown task {}, available tasks are {}".format(task, list(SUPPORTED_TASKS.keys())))
@@ -2699,6 +2703,7 @@ def pipeline(
                 "Model might be a PyTorch model (ending with `.bin`) but PyTorch is not available. "
                 "Trying to load the model with Tensorflow."
             )
+        model_kwargs["use_onnx"] = kwargs["use_onnx"]
         model = model_class.from_pretrained(model, config=config, **model_kwargs)
 
     return task_class(model=model, tokenizer=tokenizer, modelcard=modelcard, framework=framework, task=task, **kwargs)
