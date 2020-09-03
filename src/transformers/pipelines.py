@@ -519,7 +519,7 @@ class Pipeline(_ScikitCompat):
         onnx_path: Optional[str] = None,
     ):
 
-        if framework is None:
+        if framework is None and not use_onnx:
             framework = get_framework(model)
 
         self.task = task
