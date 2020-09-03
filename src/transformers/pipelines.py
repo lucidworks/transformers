@@ -527,14 +527,20 @@ class Pipeline(_ScikitCompat):
         self.tokenizer = tokenizer
         self.modelcard = modelcard
         self.framework = framework
-        self.device = device if framework == "tf" else torch.device("cpu" if device < 0 else "cuda:{}".format(device))
+        self.device = (
+            device
+            if framework == "tf"
+            else device
+            if use_onnx
+            else torch.device("cpu" if device < 0 else "cuda:{}".format(device))
+        )
         self.use_onnx = use_onnx
         self.onnx_path = onnx_path
         self.binary_output = binary_output
         self._args_parser = args_parser or DefaultArgumentHandler()
 
         # Special handling
-        if self.framework == "pt" and self.device.type == "cuda":
+        if not self.use_onnx and self.framework == "pt" and self.device.type == "cuda":
             self.model = self.model.to(self.device)
 
         # Update config with task specific parameters
@@ -589,6 +595,7 @@ class Pipeline(_ScikitCompat):
                 # Every framework specific tensor allocation will be done on the request device
                 output = pipe(...)
         """
+
         if self.framework == "tf":
             with tf.device("/CPU:0" if self.device == -1 else "/device:GPU:{}".format(self.device)):
                 yield
@@ -1590,7 +1597,9 @@ class QuestionAnsweringPipeline(Pipeline):
 
         if not self.use_onnx:
             self.check_model_type(
-                TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING if self.framework == "tf" else MODEL_FOR_QUESTION_ANSWERING_MAPPING
+                TF_MODEL_FOR_QUESTION_ANSWERING_MAPPING
+                if self.framework == "tf"
+                else MODEL_FOR_QUESTION_ANSWERING_MAPPING
             )
 
         if self.use_onnx:
@@ -1774,8 +1783,9 @@ class QuestionAnsweringPipeline(Pipeline):
         for i in tqdm(range(0, len(ex_feat[0]), batch_size), desc="Querying model", disable=not kwargs["enable_tqdm"]):
             batch = ex_feat[1][i : i + batch_size]
             fw_args = {k: [feature.__dict__[k] for feature in batch] for k in model_input_names}
-            with self.device_placement():
-                if not self.use_onnx:
+
+            if not self.use_onnx:
+                with self.device_placement():
                     if self.framework == "tf":
                         fw_args = {k: tf.constant(v) for (k, v) in fw_args.items()}
                         start, end = self.model(fw_args)[:2]
@@ -1786,8 +1796,8 @@ class QuestionAnsweringPipeline(Pipeline):
                             fw_args = {k: torch.tensor(v, device=self.device) for (k, v) in fw_args.items()}
                             start, end = self.model(**fw_args)[:2]
                             start, end = start.cpu().numpy(), end.cpu().numpy()
-                else:
-                    start, end = self.model.run(None, fw_args)[:2]
+            else:
+                start, end = self.model.run(None, fw_args)[:2]
             # Shape of start and end = (batch_size, context_len)
             all_starts.extend(start)
             all_ends.extend(end)
