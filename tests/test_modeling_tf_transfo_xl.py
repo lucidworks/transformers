@@ -77,7 +77,6 @@ class TFTransfoXLModelTester:
             div_val=self.div_val,
             n_layer=self.num_hidden_layers,
             eos_token_id=self.eos_token_id,
-            return_dict=True,
         )
 
         return (config, input_ids_1, input_ids_2, lm_labels)
@@ -145,8 +144,6 @@ class TFTransfoXLModelTest(TFModelTesterMixin, unittest.TestCase):
     all_model_classes = (TFTransfoXLModel, TFTransfoXLLMHeadModel) if is_tf_available() else ()
     all_generative_model_classes = () if is_tf_available() else ()
     # TODO: add this test when TFTransfoXLLMHead has a linear output layer implemented
-    test_pruning = False
-    test_torchscript = False
     test_resize_embeddings = False
 
     def setUp(self):

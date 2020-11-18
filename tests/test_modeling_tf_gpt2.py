@@ -26,7 +26,7 @@ from .test_modeling_tf_common import TFModelTesterMixin, ids_tensor
 if is_tf_available():
     import tensorflow as tf
 
-    from transformers.modeling_tf_gpt2 import (
+    from transformers.models.gpt2.modeling_tf_gpt2 import (
         TF_GPT2_PRETRAINED_MODEL_ARCHIVE_LIST,
         TFGPT2DoubleHeadsModel,
         TFGPT2LMHeadModel,
@@ -104,7 +104,6 @@ class TFGPT2ModelTester:
             # initializer_range=self.initializer_range
             bos_token_id=self.bos_token_id,
             eos_token_id=self.eos_token_id,
-            return_dict=True,
         )
 
         head_mask = ids_tensor([self.num_hidden_layers, self.num_attention_heads], 2)
@@ -211,6 +210,36 @@ class TFGPT2ModelTester:
         # test that outputs are equal for slice
         tf.debugging.assert_near(output_from_past_slice, output_from_no_past_slice, rtol=1e-12)
 
+    def create_and_check_gpt2_model_past_large_inputs(
+        self, config, input_ids, input_mask, head_mask, token_type_ids, *args
+    ):
+        model = TFGPT2Model(config=config)
+
+        # first forward pass
+        outputs = model(input_ids, token_type_ids=token_type_ids, use_cache=True)
+
+        output, past = outputs.to_tuple()
+
+        # create hypothetical next token and extent to next_input_ids
+        next_tokens = ids_tensor((self.batch_size, 3), config.vocab_size)
+        next_token_types = ids_tensor((self.batch_size, 3), self.type_vocab_size)
+
+        # append to next input_ids and token_type_ids
+        next_input_ids = tf.concat([input_ids, next_tokens], axis=-1)
+        next_token_type_ids = tf.concat([token_type_ids, next_token_types], axis=-1)
+
+        output_from_no_past = model(next_input_ids, token_type_ids=next_token_type_ids)["last_hidden_state"]
+        output_from_past = model(next_tokens, token_type_ids=next_token_types, past=past)["last_hidden_state"]
+        self.parent.assertTrue(output_from_past.shape[1] == next_tokens.shape[1])
+
+        # select random slice
+        random_slice_idx = int(ids_tensor((1,), shape_list(output_from_past)[-1]))
+        output_from_no_past_slice = output_from_no_past[:, -3:, random_slice_idx]
+        output_from_past_slice = output_from_past[:, :, random_slice_idx]
+
+        # test that outputs are equal for slice
+        tf.debugging.assert_near(output_from_past_slice, output_from_no_past_slice, rtol=1e-6)
+
     def create_and_check_gpt2_lm_head(self, config, input_ids, input_mask, head_mask, token_type_ids, *args):
         model = TFGPT2LMHeadModel(config=config)
         inputs = {
@@ -238,7 +267,7 @@ class TFGPT2ModelTester:
         }
         result = model(inputs)
         self.parent.assertEqual(
-            result.lm_logits.shape, (self.batch_size, self.num_choices, self.seq_length, self.vocab_size)
+            result.logits.shape, (self.batch_size, self.num_choices, self.seq_length, self.vocab_size)
         )
         self.parent.assertEqual(result.mc_logits.shape, (self.batch_size, self.num_choices))
 
@@ -289,6 +318,10 @@ class TFGPT2ModelTest(TFModelTesterMixin, unittest.TestCase):
     def test_gpt2_model_att_mask_past(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_gpt2_model_attention_mask_past(*config_and_inputs)
+
+    def test_gpt2_model_past_large_inputs(self):
+        config_and_inputs = self.model_tester.prepare_config_and_inputs()
+        self.model_tester.create_and_check_gpt2_model_past_large_inputs(*config_and_inputs)
 
     def test_gpt2_lm_head(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
