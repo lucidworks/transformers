@@ -9,7 +9,6 @@ from tqdm import tqdm
 from ...file_utils import is_tf_available, is_torch_available
 from ...models.bert.tokenization_bert import whitespace_tokenize
 from ...tokenization_utils_base import BatchEncoding, PreTrainedTokenizerBase, TruncationStrategy, PaddingStrategy
-from ...tokenization_utils_fast import PreTrainedTokenizerFast
 from ...utils import logging
 from .utils import DataProcessor
 
@@ -108,7 +107,7 @@ def squad_convert_example_to_features(
     tok_to_orig_index = []
     orig_to_tok_index = []
     all_doc_tokens = []
-    if isinstance(tokenizer, PreTrainedTokenizerFast):
+    if tokenizer.is_fast:
         tokenizer.set_truncation_and_padding(
             padding_strategy=PaddingStrategy.DO_NOT_PAD,
             truncation_strategy=TruncationStrategy.LONGEST_FIRST,
@@ -173,7 +172,7 @@ def squad_convert_example_to_features(
         if tokenizer.padding_side == "right":
             texts = (
                 truncated_query
-                if not isinstance(tokenizer, PreTrainedTokenizerFast)
+                if not tokenizer.is_fast
                 else tokenizer.decode(truncated_query)
             )
             # Needed because some tokenizers seem to produce actual tokens,
@@ -190,7 +189,7 @@ def squad_convert_example_to_features(
                 texts = span_doc_tokens
             pairs = (
                 truncated_query
-                if not isinstance(tokenizer, PreTrainedTokenizerFast)
+                if not tokenizer.is_fast
                 else tokenizer.decode(truncated_query)
             )
             truncation = TruncationStrategy.ONLY_FIRST.value
