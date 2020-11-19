@@ -10,7 +10,7 @@ from transformers.tokenization_utils_base import to_py_obj
 VALID_INPUTS = ["A simple string", ["list of strings"]]
 
 
-@is_pipeline_test
+# @is_pipeline_test
 class CustomInputPipelineCommonMixin:
     pipeline_task = None
     pipeline_loading_kwargs = {}  # Additional kwargs to load the pipeline with
