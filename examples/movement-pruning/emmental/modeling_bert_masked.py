@@ -16,7 +16,7 @@
 """Masked Version of BERT. It replaces the `torch.nn.Linear` layers with
 :class:`~emmental.MaskedLinear` and add an additional parameters in the forward pass to
 compute the adaptive mask.
-Built on top of `transformers.modeling_bert`"""
+Built on top of `transformers.models.bert.modeling_bert`"""
 
 
 import logging
@@ -28,9 +28,9 @@ from torch.nn import CrossEntropyLoss, MSELoss
 
 from emmental import MaskedBertConfig
 from emmental.modules import MaskedLinear
-from transformers.file_utils import add_start_docstrings, add_start_docstrings_to_callable
-from transformers.modeling_bert import ACT2FN, BertLayerNorm, load_tf_weights_in_bert
+from transformers.file_utils import add_start_docstrings, add_start_docstrings_to_model_forward
 from transformers.modeling_utils import PreTrainedModel, prune_linear_layer
+from transformers.models.bert.modeling_bert import ACT2FN, BertLayerNorm, load_tf_weights_in_bert
 
 
 logger = logging.getLogger(__name__)
@@ -426,35 +426,35 @@ MASKED_BERT_INPUTS_DOCSTRING = r"""
             :func:`transformers.PreTrainedTokenizer.__call__` for details.
 
             `What are input IDs? <../glossary.html#input-ids>`__
-        attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
+        attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
             Mask to avoid performing attention on padding token indices.
             Mask values selected in ``[0, 1]``:
             ``1`` for tokens that are NOT MASKED, ``0`` for MASKED tokens.
 
             `What are attention masks? <../glossary.html#attention-mask>`__
-        token_type_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
+        token_type_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
             Segment token indices to indicate first and second portions of the inputs.
             Indices are selected in ``[0, 1]``: ``0`` corresponds to a `sentence A` token, ``1``
             corresponds to a `sentence B` token
 
             `What are token type IDs? <../glossary.html#token-type-ids>`_
-        position_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
+        position_ids (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
             Indices of positions of each input sequence tokens in the position embeddings.
             Selected in the range ``[0, config.max_position_embeddings - 1]``.
 
             `What are position IDs? <../glossary.html#position-ids>`_
-        head_mask (:obj:`torch.FloatTensor` of shape :obj:`(num_heads,)` or :obj:`(num_layers, num_heads)`, `optional`, defaults to :obj:`None`):
+        head_mask (:obj:`torch.FloatTensor` of shape :obj:`(num_heads,)` or :obj:`(num_layers, num_heads)`, `optional`):
             Mask to nullify selected heads of the self-attention modules.
             Mask values selected in ``[0, 1]``:
             :obj:`1` indicates the head is **not masked**, :obj:`0` indicates the head is **masked**.
-        inputs_embeds (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`, defaults to :obj:`None`):
+        inputs_embeds (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
             Optionally, instead of passing :obj:`input_ids` you can choose to directly pass an embedded representation.
             This is useful if you want more control over how to convert `input_ids` indices into associated vectors
             than the model's internal embedding lookup matrix.
-        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`, defaults to :obj:`None`):
+        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
             Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention
             if the model is configured as a decoder.
-        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
+        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask
             is used in the cross-attention if the model is configured as a decoder.
             Mask values selected in ``[0, 1]``:
@@ -498,7 +498,7 @@ class MaskedBertModel(MaskedBertPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
-    @add_start_docstrings_to_callable(MASKED_BERT_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(MASKED_BERT_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids=None,
@@ -591,7 +591,7 @@ class MaskedBertModel(MaskedBertPreTrainedModel):
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         # If a 2D ou 3D attention mask is provided for the cross-attention
-        # we need to make broadcastabe to [batch_size, num_heads, seq_length, seq_length]
+        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.config.is_decoder and encoder_hidden_states is not None:
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
@@ -631,7 +631,7 @@ class MaskedBertModel(MaskedBertPreTrainedModel):
                 )  # We can specify head_mask for each layer
             head_mask = head_mask.to(
                 dtype=next(self.parameters()).dtype
-            )  # switch to fload if need + fp16 compatibility
+            )  # switch to float if need + fp16 compatibility
         else:
             head_mask = [None] * self.config.num_hidden_layers
 
@@ -671,7 +671,7 @@ class MaskedBertForSequenceClassification(MaskedBertPreTrainedModel):
 
         self.init_weights()
 
-    @add_start_docstrings_to_callable(MASKED_BERT_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(MASKED_BERT_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids=None,
@@ -684,7 +684,7 @@ class MaskedBertForSequenceClassification(MaskedBertPreTrainedModel):
         threshold=None,
     ):
         r"""
-            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
+            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
                 Labels for computing the sequence classification/regression loss.
                 Indices should be in :obj:`[0, ..., config.num_labels - 1]`.
                 If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
@@ -756,7 +756,7 @@ class MaskedBertForMultipleChoice(MaskedBertPreTrainedModel):
 
         self.init_weights()
 
-    @add_start_docstrings_to_callable(MASKED_BERT_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(MASKED_BERT_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids=None,
@@ -769,7 +769,7 @@ class MaskedBertForMultipleChoice(MaskedBertPreTrainedModel):
         threshold=None,
     ):
         r"""
-            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
+            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
                 Labels for computing the multiple choice classification loss.
                 Indices should be in ``[0, ..., num_choices]`` where `num_choices` is the size of the second dimension
                 of the input tensors. (see `input_ids` above)
@@ -846,7 +846,7 @@ class MaskedBertForTokenClassification(MaskedBertPreTrainedModel):
 
         self.init_weights()
 
-    @add_start_docstrings_to_callable(MASKED_BERT_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(MASKED_BERT_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids=None,
@@ -859,7 +859,7 @@ class MaskedBertForTokenClassification(MaskedBertPreTrainedModel):
         threshold=None,
     ):
         r"""
-            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`, defaults to :obj:`None`):
+            labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
                 Labels for computing the token classification loss.
                 Indices should be in ``[0, ..., config.num_labels - 1]``.
             threshold (:obj:`float`):
@@ -932,7 +932,7 @@ class MaskedBertForQuestionAnswering(MaskedBertPreTrainedModel):
 
         self.init_weights()
 
-    @add_start_docstrings_to_callable(MASKED_BERT_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(MASKED_BERT_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids=None,
@@ -946,11 +946,11 @@ class MaskedBertForQuestionAnswering(MaskedBertPreTrainedModel):
         threshold=None,
     ):
         r"""
-            start_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
+            start_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
                 Labels for position (index) of the start of the labelled span for computing the token classification loss.
                 Positions are clamped to the length of the sequence (`sequence_length`).
                 Position outside of the sequence are not taken into account for computing the loss.
-            end_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`, defaults to :obj:`None`):
+            end_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
                 Labels for position (index) of the end of the labelled span for computing the token classification loss.
                 Positions are clamped to the length of the sequence (`sequence_length`).
                 Position outside of the sequence are not taken into account for computing the loss.

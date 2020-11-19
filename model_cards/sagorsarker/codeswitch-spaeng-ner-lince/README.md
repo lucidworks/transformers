@@ -3,8 +3,8 @@ language:
 - es
 - en
 datasets:
-- LinCE
-license: "MIT"
+- lince
+license: mit
 tags:
 - codeswitching
 - spanish-english
