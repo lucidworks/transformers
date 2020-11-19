@@ -1858,7 +1858,7 @@ class QuestionAnsweringPipeline(Pipeline):
             raise ValueError("max_answer_len parameter should be >= 1 (got {})".format(kwargs["max_answer_len"]))
 
         # Convert inputs to features
-        examples = self._args_parser(*args, **kwargs)
+        examples = self._args_parser(*args, **kwargs)[0]
 
         features_list = squad_convert_examples_to_features(
             examples=examples,
