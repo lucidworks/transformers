@@ -1608,52 +1608,55 @@ class QuestionAnsweringArgumentHandler(ArgumentHandler):
     command-line supplied arguments.
     """
 
-    def normalize(self, item):
-        if isinstance(item, SquadExample):
-            return item
-        elif isinstance(item, dict):
-            for k in ["question", "context"]:
-                if k not in item:
-                    raise KeyError("You need to provide a dictionary with keys {question:..., context:...}")
-                elif item[k] is None:
-                    raise ValueError("`{}` cannot be None".format(k))
-                elif isinstance(item[k], str) and len(item[k]) == 0:
-                    raise ValueError("`{}` cannot be empty".format(k))
-
-            return QuestionAnsweringPipeline.create_sample(**item)
-        raise ValueError("{} argument needs to be of type (SquadExample, dict)".format(item))
-
     def __call__(self, *args, **kwargs):
-        # Detect where the actual inputs are
+        # Position args, handling is sensibly the same as X and data, so forwarding to avoid duplicating
         if args is not None and len(args) > 0:
             if len(args) == 1:
-                inputs = args[0]
-            elif len(args) == 2 and {type(el) for el in args} == {str}:
-                inputs = [{"question": args[0], "context": args[1]}]
+                kwargs["X"] = args[0]
             else:
-                inputs = list(args)
+                kwargs["X"] = list(args)
+
         # Generic compatibility with sklearn and Keras
         # Batched data
-        elif "X" in kwargs:
-            inputs = kwargs["X"]
-        elif "data" in kwargs:
-            inputs = kwargs["data"]
+        if "X" in kwargs or "data" in kwargs:
+            inputs = kwargs["X"] if "X" in kwargs else kwargs["data"]
+
+            if isinstance(inputs, dict):
+                inputs = [inputs]
+            else:
+                # Copy to avoid overriding arguments
+                inputs = [i for i in inputs]
+
+            for i, item in enumerate(inputs):
+                if isinstance(item, dict):
+                    if any(k not in item for k in ["question", "context"]):
+                        raise KeyError("You need to provide a dictionary with keys {question:..., context:...}")
+
+                    inputs[i] = QuestionAnsweringPipeline.create_sample(**item)
+
+                elif not isinstance(item, SquadExample):
+                    raise ValueError(
+                        "{} argument needs to be of type (list[SquadExample | dict], SquadExample, dict)".format(
+                            "X" if "X" in kwargs else "data"
+                        )
+                    )
+
+            # Tabular input
         elif "question" in kwargs and "context" in kwargs:
-            inputs = [{"question": kwargs["question"], "context": kwargs["context"]}]
+            if isinstance(kwargs["question"], str):
+                kwargs["question"] = [kwargs["question"]]
+
+            if isinstance(kwargs["context"], str):
+                kwargs["context"] = [kwargs["context"]]
+
+            inputs = [
+                QuestionAnsweringPipeline.create_sample(q, c) for q, c in zip(kwargs["question"], kwargs["context"])
+            ]
         else:
             raise ValueError("Unknown arguments {}".format(kwargs))
 
-        # Normalize inputs
-        if isinstance(inputs, dict):
+        if not isinstance(inputs, list):
             inputs = [inputs]
-        elif isinstance(inputs, Iterable):
-            # Copy to avoid overriding arguments
-            inputs = [i for i in inputs]
-        else:
-            raise ValueError("Invalid arguments {}".format(inputs))
-
-        for i, item in enumerate(inputs):
-            inputs[i] = self.normalize(item)
 
         return inputs
 
@@ -1858,7 +1861,7 @@ class QuestionAnsweringPipeline(Pipeline):
             raise ValueError("max_answer_len parameter should be >= 1 (got {})".format(kwargs["max_answer_len"]))
 
         # Convert inputs to features
-        examples = self._args_parser(*args, **kwargs)[0]
+        examples = self._args_parser(*args, **kwargs)
 
         features_list = squad_convert_examples_to_features(
             examples=examples,
