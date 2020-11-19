@@ -18,8 +18,8 @@ import json
 import os
 import unittest
 
+from transformers.models.xlm.tokenization_xlm import VOCAB_FILES_NAMES, XLMTokenizer
 from transformers.testing_utils import slow
-from transformers.tokenization_xlm import VOCAB_FILES_NAMES, XLMTokenizer
 
 from .test_tokenization_common import TokenizerTesterMixin
 
@@ -27,6 +27,7 @@ from .test_tokenization_common import TokenizerTesterMixin
 class XLMTokenizationTest(TokenizerTesterMixin, unittest.TestCase):
 
     tokenizer_class = XLMTokenizer
+    test_rust_tokenizer = False
 
     def setUp(self):
         super().setUp()

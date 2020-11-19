@@ -3,8 +3,8 @@ language:
 - ne
 - en
 datasets:
-- LinCE
-license: "MIT"
+- lince
+license: mit
 tags:
 - codeswitching
 - nepali-english

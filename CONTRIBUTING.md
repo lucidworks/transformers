@@ -9,6 +9,9 @@ It also helps us if you spread the word: reference the library from blog posts
 on the awesome projects it made possible, shout out on Twitter every time it has
 helped you, or simply star the repo to say "thank you".
 
+Whichever way you choose to contribute, please be mindful to respect our
+[code of conduct](https://github.com/huggingface/transformers/blob/master/CODE_OF_CONDUCT.md).
+
 ## You can contribute in so many ways!
 
 There are 4 ways you can contribute to transformers:
@@ -93,7 +96,7 @@ folder.
 
 ## Start contributing! (Pull Requests)
 
-Before writing code, we strongly advise you to search through the exising PRs or
+Before writing code, we strongly advise you to search through the existing PRs or
 issues to make sure that nobody is already working on the same thing. If you are
 unsure, it is always a good idea to open an issue to get some feedback.
 
@@ -134,6 +137,18 @@ Follow these steps to start contributing:
    it with `pip uninstall transformers` before reinstalling it in editable
    mode with the `-e` flag.)
 
+   To run the full test suite, you might need the additional dependency on `datasets` which requires a separate source
+   install:
+
+   ```bash
+   $ git clone https://github.com/huggingface/datasets
+   $ cd datasets
+   $ pip install -e .
+   ```
+
+   If you have already cloned that repo, you might need to `git pull` to get the most recent changes in the `datasets`
+   library.
+
 5. Develop the features on your branch.
 
    As you work on the features, you should make sure that the test suite
@@ -158,12 +173,19 @@ Follow these steps to start contributing:
    $ make style
    ```
 
-   `transformers` also uses `flake8` to check for coding mistakes. Quality
+   `transformers` also uses `flake8` and a few custom scripts to check for coding mistakes. Quality
    control runs in CI, however you can also run the same checks with:
 
    ```bash
    $ make quality
    ```
+   You can do the automatic style corrections and code verifications that can't be automated in one go:
+
+   ```bash
+   $ make fixup
+   ```
+
+   This target is also optimized to only work with files modified by the PR you're working on.
 
    If you're modifying documents under `docs/source`, make sure to validate that
    they can still be built. This check also runs in CI. To run a local check
@@ -213,7 +235,7 @@ Follow these steps to start contributing:
 ### Checklist
 
 1. The title of your pull request should be a summary of its contribution;
-2. If your pull request adresses an issue, please mention the issue number in
+2. If your pull request addresses an issue, please mention the issue number in
    the pull request description to make sure they are linked (and people
    consulting the issue know you are working on it);
 3. To indicate a work in progress please prefix the title with `[WIP]`. These
@@ -286,3 +308,12 @@ Check our [documentation writing guide](https://github.com/huggingface/transform
 for more information.
 
 #### This guide was heavily inspired by the awesome [scikit-learn guide to contributing](https://github.com/scikit-learn/scikit-learn/blob/master/CONTRIBUTING.md)
+
+
+### Develop on Windows
+
+One way one can run the make command on Window is to pass by MSYS2:
+
+1. [Download MSYS2](https://www.msys2.org/), we assume to have it installed in C:\msys64
+2. Open the command line C:\msys64\msys2.exe (it should be available from the start menu)
+3. Run in the shell: `pacman -Syu` and install make with `pacman -S make`

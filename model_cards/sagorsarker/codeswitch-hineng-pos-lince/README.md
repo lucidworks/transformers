@@ -3,8 +3,8 @@ language:
 - hi
 - en
 datasets:
-- LinCE
-license: "MIT"
+- lince
+license: mit
 tags:
 - codeswitching
 - hindi-english
