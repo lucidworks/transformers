@@ -107,6 +107,8 @@ class DistilBertConfig(PretrainedConfig):
         qa_dropout=0.1,
         seq_classif_dropout=0.2,
         pad_token_id=0,
+        quant_mode=False,
+        force_dequant="none",
         **kwargs
     ):
         super().__init__(**kwargs, pad_token_id=pad_token_id)
@@ -123,6 +125,8 @@ class DistilBertConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.qa_dropout = qa_dropout
         self.seq_classif_dropout = seq_classif_dropout
+        self.quant_mode = quant_mode
+        self.force_dequant = force_dequant
 
     @property
     def hidden_size(self):

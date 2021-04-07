@@ -26,6 +26,15 @@ import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 
+from transformers.models.distilbert.quant_modules import (
+    IntGELU,
+    IntLayerNorm,
+    IntSoftmax,
+    QuantAct,
+    QuantEmbedding,
+    QuantLinear,
+)
+
 from ...activations import gelu
 from ...file_utils import (
     add_code_sample_docstrings,
@@ -82,15 +91,45 @@ def create_sinusoidal_embeddings(n_pos, dim, out):
 class Embeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.word_embeddings = nn.Embedding(config.vocab_size, config.dim, padding_idx=config.pad_token_id)
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.dim)
+
+        self.quant_mode = config.quant_mode
+        self.embedding_bit = 8
+        self.embedding_act_bit = 16
+        self.act_bit = 8
+        self.ln_output_bit = 32
+
+        self.word_embeddings = QuantEmbedding(
+            config.vocab_size,
+            config.dim,
+            padding_idx=config.pad_token_id,
+            weight_bit=self.embedding_bit,
+            quant_mode=self.quant_mode,
+        )
+        self.position_embeddings = QuantEmbedding(
+            config.max_position_embeddings,
+            config.dim,
+            padding_idx=config.pad_token_id,
+            weight_bit=self.embedding_bit,
+            quant_mode=self.quant_mode,
+        )
+        self.int_addition_activation = QuantAct(self.embedding_act_bit, quant_mode=self.quant_mode)
+
         if config.sinusoidal_pos_embds:
             create_sinusoidal_embeddings(
                 n_pos=config.max_position_embeddings, dim=config.dim, out=self.position_embeddings.weight
             )
 
-        self.LayerNorm = nn.LayerNorm(config.dim, eps=1e-12)
+        self.LayerNorm = IntLayerNorm(
+            config.dim,
+            eps=1e-12,
+            output_bit=self.ln_output_bit,
+            quant_mode=self.quant_mode,
+            force_dequant=config.force_dequant,
+        )
+
         self.dropout = nn.Dropout(config.dropout)
+
+        self.int_output_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
 
     def forward(self, input_ids):
         """
@@ -104,18 +143,39 @@ class Embeddings(nn.Module):
         position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)  # (max_seq_length)
         position_ids = position_ids.unsqueeze(0).expand_as(input_ids)  # (bs, max_seq_length)
 
-        word_embeddings = self.word_embeddings(input_ids)  # (bs, max_seq_length, dim)
-        position_embeddings = self.position_embeddings(position_ids)  # (bs, max_seq_length, dim)
+        word_embeddings, word_embeddings_scaling_factor = self.word_embeddings(input_ids)  # (bs, max_seq_length, dim)
+        position_embeddings, position_embeddings_scaling_factor = self.position_embeddings(
+            position_ids
+        )  # (bs, max_seq_length, dim)
 
-        embeddings = word_embeddings + position_embeddings  # (bs, max_seq_length, dim)
-        embeddings = self.LayerNorm(embeddings)  # (bs, max_seq_length, dim)
+        # embeddings = word_embeddings + position_embeddings  # (bs, max_seq_length, dim)
+        embeddings, embeddings_scaling_factor = self.int_addition_activation(
+            word_embeddings,
+            word_embeddings_scaling_factor,
+            identity=position_embeddings,
+            identity_scaling_factor=position_embeddings_scaling_factor,
+        )
+
+        embeddings, embeddings_scaling_factor = self.LayerNorm(embeddings, embeddings_scaling_factor)  # (bs, max_seq_length, dim)
+
         embeddings = self.dropout(embeddings)  # (bs, max_seq_length, dim)
-        return embeddings
+
+        # Quantize to 8 bit
+        embeddings, embeddings_scaling_factor = self.int_output_activation(
+            embeddings, embeddings_scaling_factor
+        )
+
+        return embeddings, embeddings_scaling_factor
 
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
+
+        self.quant_mode = config.quant_mode
+        self.weight_bit = 8
+        self.bias_bit = 32
+        self.act_bit = 8
 
         self.n_heads = config.n_heads
         self.dim = config.dim
@@ -123,10 +183,49 @@ class MultiHeadSelfAttention(nn.Module):
 
         assert self.dim % self.n_heads == 0
 
-        self.q_lin = nn.Linear(in_features=config.dim, out_features=config.dim)
-        self.k_lin = nn.Linear(in_features=config.dim, out_features=config.dim)
-        self.v_lin = nn.Linear(in_features=config.dim, out_features=config.dim)
-        self.out_lin = nn.Linear(in_features=config.dim, out_features=config.dim)
+        self.q_lin = QuantLinear(
+            in_features=config.dim,
+            out_features=config.dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
+        self.k_lin = QuantLinear(
+            in_features=config.dim,
+            out_features=config.dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
+        self.v_lin = QuantLinear(
+            in_features=config.dim,
+            out_features=config.dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
+        self.out_lin = QuantLinear(
+            in_features=config.dim,
+            out_features=config.dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
+
+        self.q_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+        self.k_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+        self.v_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+
+        self.int_softmax = IntSoftmax(self.act_bit, quant_mode=self.quant_mode, force_dequant=config.force_dequant)
+        self.softmax_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+
+        self.context_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+
+        self.out_int_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
 
         self.pruned_heads = set()
 
@@ -145,7 +244,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.dim = attention_head_size * self.n_heads
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def forward(self, query, key, value, mask, head_mask=None, output_attentions=False):
+    def forward(self, query, key, value, scaling_factor, mask, head_mask=None, output_attentions=False):
         """
         Parameters:
             query: torch.tensor(bs, seq_length, dim)
@@ -159,7 +258,7 @@ class MultiHeadSelfAttention(nn.Module):
         """
         bs, q_length, dim = query.size()
         k_length = key.size(1)
-        # assert dim == self.dim, f'Dimensions do not match: {dim} input vs {self.dim} configured'
+        # assert dim == self.dim, 'Dimensions do not match: %s input vs %s configured' % (dim, self.dim)
         # assert key.size() == value.size()
 
         dim_per_head = self.dim // self.n_heads
@@ -174,16 +273,33 @@ class MultiHeadSelfAttention(nn.Module):
             """ group heads """
             return x.transpose(1, 2).contiguous().view(bs, -1, self.n_heads * dim_per_head)
 
-        q = shape(self.q_lin(query))  # (bs, n_heads, q_length, dim_per_head)
-        k = shape(self.k_lin(key))  # (bs, n_heads, k_length, dim_per_head)
-        v = shape(self.v_lin(value))  # (bs, n_heads, k_length, dim_per_head)
+        q, q_scaling_factor = self.q_lin(query, scaling_factor)
+        k, k_scaling_factor = self.k_lin(key, scaling_factor)
+        v, v_scaling_factor = self.v_lin(value, scaling_factor)
+
+        q, q_scaling_factor = self.q_int_activation(q, q_scaling_factor)
+        k, k_scaling_factor = self.k_int_activation(k, k_scaling_factor)
+        v, v_scaling_factor = self.v_int_activation(v, v_scaling_factor)
+
+        q = shape(q)  # (bs, n_heads, q_length, dim_per_head)
+        k = shape(k)  # (bs, n_heads, k_length, dim_per_head)
+        v = shape(v)  # (bs, n_heads, k_length, dim_per_head)
 
         q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
         scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
         scores.masked_fill_(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
 
-        weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
+        if self.quant_mode:
+            scores_scaling_factor = q_scaling_factor * k_scaling_factor / math.sqrt(dim_per_head)
+        else:
+            scores_scaling_factor = None
+
+        weights, weights_scaling_factor = self.int_softmax(
+            scores, scores_scaling_factor
+        )  # (bs, n_heads, q_length, k_length)
+        weights, weights_scaling_factor = self.softmax_int_activation(weights, weights_scaling_factor)
+
         weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
 
         # Mask heads if we want to
@@ -192,49 +308,122 @@ class MultiHeadSelfAttention(nn.Module):
 
         context = torch.matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
         context = unshape(context)  # (bs, q_length, dim)
-        context = self.out_lin(context)  # (bs, q_length, dim)
+
+        if self.quant_mode:
+            context_scaling_factor = weights_scaling_factor * v_scaling_factor
+        else:
+            context_scaling_factor = None
+
+        context, context_scaling_factor = self.context_int_activation(context, context_scaling_factor)
+
+        context, context_scaling_factor = self.out_lin(context, context_scaling_factor)  # (bs, q_length, dim)
+
+        context, context_scaling_factor = self.out_int_activation(context, context_scaling_factor)
 
         if output_attentions:
-            return (context, weights)
+            return (context, context_scaling_factor), (weights, weights_scaling_factor)
         else:
-            return (context,)
+            return context, context_scaling_factor
 
 
 class FFN(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.quant_mode = config.quant_mode
+        self.act_bit = 8
+        self.weight_bit = 8
+        self.bias_bit = 32
+
         self.dropout = nn.Dropout(p=config.dropout)
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.lin1 = nn.Linear(in_features=config.dim, out_features=config.hidden_dim)
-        self.lin2 = nn.Linear(in_features=config.hidden_dim, out_features=config.dim)
-        assert config.activation in ["relu", "gelu"], f"activation ({config.activation}) must be in ['relu', 'gelu']"
-        self.activation = gelu if config.activation == "gelu" else nn.ReLU()
 
-    def forward(self, input):
-        return apply_chunking_to_forward(self.ff_chunk, self.chunk_size_feed_forward, self.seq_len_dim, input)
+        self.lin1 = QuantLinear(
+            in_features=config.dim,
+            out_features=config.hidden_dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
+        self.lin2 = QuantLinear(
+            in_features=config.hidden_dim,
+            out_features=config.dim,
+            bias=True,
+            bias_bit=self.bias_bit,
+            quant_mode=self.quant_mode,
+            per_channel=True,
+        )
 
-    def ff_chunk(self, input):
-        x = self.lin1(input)
-        x = self.activation(x)
-        x = self.lin2(x)
+        assert config.activation in ["relu", "gelu"], "activation ({}) must be in ['relu', 'gelu']".format(
+            config.activation
+        )
+        self.activation = (
+            IntGELU(quant_mode=self.quant_mode, force_dequant=config.force_dequant)
+            if config.activation == "gelu"
+            else nn.ReLU()
+        )
+
+        self.int_gelu_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+
+    def forward(self, input, input_scaling_factor):
+        # return apply_chunking_to_forward(self.ff_chunk, self.chunk_size_feed_forward, self.seq_len_dim, input)
+        x, x_scaling_factor = self.lin1(input, input_scaling_factor)
+        x, x_scaling_factor = self.activation(x, x_scaling_factor)
+
+        x, x_scaling_factor = self.int_gelu_activation(x, x_scaling_factor)
+
+        x, x_scaling_factor = self.lin2(x, x_scaling_factor)
         x = self.dropout(x)
-        return x
+
+        return x, x_scaling_factor
+
+    # def ff_chunk(self, input):
+    #     x = self.lin1(input)
+    #     x = self.activation(x)
+    #     x = self.lin2(x)
+    #     x = self.dropout(x)
+    #     return x
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.quant_mode = config.quant_mode
+        self.act_bit = 8
+        self.weight_bit = 8
+        self.bias_bit = 32
+        self.ln_input_bit = 22
+        self.ln_output_bit = 32
 
         assert config.dim % config.n_heads == 0
 
         self.attention = MultiHeadSelfAttention(config)
-        self.sa_layer_norm = nn.LayerNorm(normalized_shape=config.dim, eps=1e-12)
+
+        self.int_addition_activation = QuantAct(self.ln_input_bit, quant_mode=self.quant_mode)
+        self.int_ln1_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+        self.int_ln2_activation = QuantAct(self.ln_input_bit, quant_mode=self.quant_mode)
+
+        self.sa_layer_norm = IntLayerNorm(
+            normalized_shape=config.dim,
+            eps=1e-12,
+            output_bit=self.ln_output_bit,
+            quant_mode=self.quant_mode,
+            force_dequant=config.force_dequant,
+        )
 
         self.ffn = FFN(config)
-        self.output_layer_norm = nn.LayerNorm(normalized_shape=config.dim, eps=1e-12)
+        self.output_layer_norm = IntLayerNorm(
+            normalized_shape=config.dim,
+            eps=1e-12,
+            output_bit=self.ln_output_bit,
+            quant_mode=self.quant_mode,
+            force_dequant=config.force_dequant,
+        )
 
-    def forward(self, x, attn_mask=None, head_mask=None, output_attentions=False):
+        self.int_output_activation = QuantAct(self.act_bit, quant_mode=self.quant_mode)
+
+    def forward(self, x, x_scaling_factor, attn_mask=None, head_mask=None, output_attentions=False):
         """
         Parameters:
             x: torch.tensor(bs, seq_length, dim)
@@ -245,24 +434,47 @@ class TransformerBlock(nn.Module):
             torch.tensor(bs, seq_length, dim) The output of the transformer block contextualization.
         """
         # Self-Attention
-        sa_output = self.attention(
+        output = self.attention(
             query=x,
             key=x,
             value=x,
+            scaling_factor=x_scaling_factor,
             mask=attn_mask,
             head_mask=head_mask,
             output_attentions=output_attentions,
         )
+
         if output_attentions:
-            sa_output, sa_weights = sa_output  # (bs, seq_length, dim), (bs, n_heads, seq_length, seq_length)
+            (
+                sa_output_and_factor,
+                sa_weights_and_factor,
+            ) = output  # (bs, seq_length, dim), (bs, n_heads, seq_length, seq_length)
+            sa_output, sa_output_scaling_factor = sa_output_and_factor
+            sa_weights, sa_weights_scaling_factor = sa_weights_and_factor
         else:  # To handle these `output_attentions` or `output_hidden_states` cases returning tuples
-            assert type(sa_output) == tuple
-            sa_output = sa_output[0]
-        sa_output = self.sa_layer_norm(sa_output + x)  # (bs, seq_length, dim)
+            assert type(output) == tuple
+            sa_output_and_factor = output
+            sa_output, sa_output_scaling_factor = sa_output_and_factor
+
+        # sa_output = self.sa_layer_norm(sa_output + x)  # (bs, seq_length, dim)
+        sa_output, sa_output_scaling_factor = self.int_addition_activation(
+            sa_output, sa_output_scaling_factor, identity=x, identity_scaling_factor=x_scaling_factor
+        )
+
+        sa_output, sa_output_scaling_factor = self.sa_layer_norm(sa_output, sa_output_scaling_factor)
+        sa_output, sa_output_scaling_factor = self.int_ln1_activation(sa_output, sa_output_scaling_factor)
 
         # Feed Forward Network
-        ffn_output = self.ffn(sa_output)  # (bs, seq_length, dim)
-        ffn_output = self.output_layer_norm(ffn_output + sa_output)  # (bs, seq_length, dim)
+        ffn_output, ffn_output_scaling_factor = self.ffn(sa_output, sa_output_scaling_factor)  # (bs, seq_length, dim)
+
+        ffn_output, ffn_output_scaling_factor = self.int_ln2_activation(
+            ffn_output, ffn_output_scaling_factor, identity=sa_output, identity_scaling_factor=sa_output_scaling_factor
+        )
+
+        # ffn_output, ffn_output_scaling_factor = self.output_layer_norm(ffn_output + sa_output)  # (bs, seq_length, dim)
+        ffn_output, ffn_output_scaling_factor = self.output_layer_norm(ffn_output, ffn_output_scaling_factor)
+
+        ffn_output, ffn_output_scaling_factor = self.int_output_activation(ffn_output, ffn_output_scaling_factor)
 
         output = (ffn_output,)
         if output_attentions:
@@ -279,7 +491,14 @@ class Transformer(nn.Module):
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.n_layers)])
 
     def forward(
-        self, x, attn_mask=None, head_mask=None, output_attentions=False, output_hidden_states=False, return_dict=None
+        self,
+        x,
+        x_scaling_factor,
+        attn_mask=None,
+        head_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        return_dict=None,
     ):  # docstyle-ignore
         """
         Parameters:
@@ -299,12 +518,17 @@ class Transformer(nn.Module):
         all_attentions = () if output_attentions else None
 
         hidden_state = x
+        hidden_state_scaling_factor = x_scaling_factor
         for i, layer_module in enumerate(self.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_state,)
 
             layer_outputs = layer_module(
-                x=hidden_state, attn_mask=attn_mask, head_mask=head_mask[i], output_attentions=output_attentions
+                x=hidden_state,
+                x_scaling_factor=hidden_state_scaling_factor,
+                attn_mask=attn_mask,
+                head_mask=head_mask[i],
+                output_attentions=output_attentions,
             )
             hidden_state = layer_outputs[-1]
 
@@ -477,9 +701,11 @@ class DistilBertModel(DistilBertPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
         if inputs_embeds is None:
-            inputs_embeds = self.embeddings(input_ids)  # (bs, seq_length, dim)
+            inputs_embeds, inputs_embeds_scaling_factor = self.embeddings(input_ids)  # (bs, seq_length, dim)
+
         return self.transformer(
             x=inputs_embeds,
+            x_scaling_factor=inputs_embeds_scaling_factor,
             attn_mask=attention_mask,
             head_mask=head_mask,
             output_attentions=output_attentions,
